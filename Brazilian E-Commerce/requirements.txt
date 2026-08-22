@@ -1,0 +1,1 @@
+pip install jupysql pandas duckdb pandas jupyter jupysql duckdb-engine matplotlib ipykernel seaborn matplotlib 
