@@ -1,1 +1,11 @@
-pip install jupysql pandas duckdb pandas jupyter jupysql duckdb-engine matplotlib ipykernel seaborn matplotlib 
+duckdb
+duckdb-engine
+ipykernel
+jupyter
+jupysql
+jupytext
+kiwisolver==1.4.8
+matplotlib
+nbdime
+pandas
+seaborn
