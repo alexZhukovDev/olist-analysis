@@ -1,7 +1,6 @@
 # ---
 # jupyter:
 #   jupytext:
-#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -1040,6 +1039,38 @@ sns.histplot(distance)
 
 # %%
 con.sql("""
+CREATE OR REPLACE TEMP VIEW zip_coordinates AS
+
+SELECT 
+    geolocation_zip_code_prefix AS zip_prefix,
+    geolocation_state as state,
+    MEDIAN(geolocation_lat) AS latitude,
+    MEDIAN(geolocation_lng) AS longitude,
+    MIN(geolocation_lat) AS min_lat,
+    MAX(geolocation_lat) AS max_lat,
+    MIN(geolocation_lng) AS min_lng,
+    MAX(geolocation_lng) AS max_lng,
+    AVG(geolocation_lat) AS avg_lat,
+    AVG(geolocation_lng) AS avg_lng,
+    (max_lat - min_lat) AS lat_diff,
+    (max_lng - min_lng) AS lng_diff,
+    ABS(avg_lat - latitude) lat_avg_median_diff,
+    ABS(avg_lng - longitude) lng_avg_median_diff,
+
+    COUNT(*) as count_coordinates
+FROM geolocation
+GROUP BY geolocation_zip_code_prefix, geolocation_state
+""")
+
+# %%
+con.sql("""
+SELECT * FROM zip_coordinates
+""")
+
+# %%
+con.sql("""
+CREATE OR REPLACE TEMP VIEW route_distances AS
+
 WITH order_sellers AS (
     SELECT 
         order_id,
@@ -1053,25 +1084,6 @@ order_seller_count AS (
         COUNT(seller_id) AS seller_count
     FROM order_sellers
     GROUP BY order_id
-),
-zip_coordinates AS (
-    SELECT 
-        geolocation_zip_code_prefix AS zip_prefix,
-        geolocation_state as state,
-        MEDIAN(geolocation_lat) AS latitude,
-        MEDIAN(geolocation_lng) AS longitude,
-        MIN(geolocation_lat) AS min_lat,
-        MAX(geolocation_lat) AS max_lat,
-        MIN(geolocation_lng) AS min_lng,
-        MAX(geolocation_lng) AS max_lng,
-        AVG(geolocation_lat) AS avg_lat,
-        AVG(geolocation_lng) AS avg_lng,
-        (max_lat - min_lat) AS lat_diff,
-        (max_lng - min_lng) AS lng_diff,
-        ABS(avg_lat - latitude) lat_avg_median_diff,
-        ABS(avg_lng - longitude) lng_avg_median_diff,
-    FROM geolocation
-    GROUP BY geolocation_zip_code_prefix, geolocation_state
 ),
 route_coordinates AS (
 SELECT
@@ -1126,8 +1138,7 @@ SELECT
     customer_lng_rad - seller_lng_rad AS delta_lng,
     POW(SIN(delta_lat / 2), 2) + COS(seller_lat_rad) * COS(customer_lat_rad) * POW(SIN(delta_lng / 2), 2) AS a
 FROM coordinates_radians
-),
-route_distances AS (
+)
 SELECT 
     order_id,
     rc.seller_id,
@@ -1142,8 +1153,16 @@ SELECT
     6371 * 2 * ASIN(SQRT(a)) AS straight_line_distance_km
 FROM haversine_components     
     JOIN route_coordinates rc USING (order_id)
-),
-quantiles AS (
+""")
+
+# %%
+con.sql("""
+SELECT COUNT(*), COUNT(DISTINCT order_id)
+FROM route_distances
+""")
+
+# %%
+con.sql("""
 SELECT
     QUANTILE_CONT(straight_line_distance_km, 0.8) AS p80,
     QUANTILE_CONT(straight_line_distance_km, 0.9) AS p90,
@@ -1151,7 +1170,10 @@ SELECT
     QUANTILE_CONT(straight_line_distance_km, 0.99) AS p99,
     QUANTILE_CONT(straight_line_distance_km, 0.999) AS p99_9,
 FROM route_distances
-)
+""")
+
+# %%
+con.sql("""
 SELECT 
     customer_state, 
     seller_state, 
@@ -1171,6 +1193,163 @@ FROM route_distances rc
         AND rc.customer_state = exc_customer.state
 ORDER BY straight_line_distance_km DESC
 LIMIT 20;
-""").df()
+""")
+
+# %%
+con.sql("""
+SELECT 
+    COUNT(*),
+    MEDIAN(lat_diff) AS median_lat_diff,
+    MEDIAN(lng_diff) AS median_lng_diff,
+    QUANTILE_CONT(lat_diff, 0.9) AS lat_diff_p90,
+    QUANTILE_CONT(lat_diff, 0.95) AS lat_diff_p95,
+    QUANTILE_CONT(lat_diff, 0.99) AS lat_diff_p99,
+    QUANTILE_CONT(lat_diff, 0.999) AS lat_diff_p999,
+    QUANTILE_CONT(lng_diff, 0.9) AS lng_diff_p90,
+    QUANTILE_CONT(lng_diff, 0.95) AS lng_diff_p95,
+    QUANTILE_CONT(lng_diff, 0.99) AS lng_diff_p99,
+    QUANTILE_CONT(lng_diff, 0.999) AS lng_diff_p999,
+    MAX(lat_diff),
+    MAX(lng_diff)
+FROM zip_coordinates
+""")
+
+# %%
+con.sql("""
+WITH zip_tresholds AS ( 
+SELECT 
+    QUANTILE_CONT(lat_diff, 0.999) AS lat_diff_p999,
+    QUANTILE_CONT(lng_diff, 0.999) AS lng_diff_p999,
+FROM zip_coordinates
+),
+zip_quality AS (
+SELECT 
+    zip_prefix,
+    state,
+    lat_diff > lat_diff_p999 AS lat_cond,
+    lng_diff > lng_diff_p999 AS lng_cond
+FROM zip_coordinates
+    CROSS JOIN zip_tresholds
+)
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE lat_cond OR lng_cond),
+    COUNT(*) FILTER (WHERE lat_cond AND lng_cond)
+FROM zip_quality
+""")
+
+# %%
+con.sql("""
+WITH zip_tresholds AS ( 
+SELECT 
+    QUANTILE_CONT(lat_diff, 0.999) AS lat_diff_p999,
+    QUANTILE_CONT(lng_diff, 0.999) AS lng_diff_p999,
+FROM zip_coordinates
+),
+zip_quality AS (
+SELECT 
+    zip_prefix,
+    state,
+    lat_diff > lat_diff_p999 AS lat_cond,
+    lng_diff > lng_diff_p999 AS lng_cond
+FROM zip_coordinates
+    CROSS JOIN zip_tresholds
+),
+route_zip_quality AS (
+SELECT 
+    order_id,
+    seller_zip_code_prefix,
+    seller_state,
+    customer_zip_code_prefix,
+    customer_state,
+    seller_quality.lat_cond AS seller_lat_cond,
+    seller_quality.lng_cond AS seller_lng_cond,
+    customer_quality.lat_cond AS customer_lat_cond,
+    customer_quality.lng_cond AS customer_lng_cond,
+
+FROM route_distances rd
+    JOIN zip_quality seller_quality 
+        ON rd.seller_zip_code_prefix = seller_quality.zip_prefix
+        AND rd.seller_state = seller_quality.state
+    JOIN zip_quality customer_quality 
+        ON rd.customer_zip_code_prefix = customer_quality.zip_prefix
+        AND rd.customer_state = customer_quality.state
+),
+route_quality_summary AS ( 
+SELECT
+    COUNT(*) as orders_count,
+    COUNT(*) FILTER (WHERE seller_lat_cond OR seller_lng_cond) AS seller_suspicious,
+    COUNT(*) FILTER (WHERE customer_lat_cond OR customer_lng_cond) AS customer_suspicious,
+    COUNT(*) FILTER (WHERE (seller_lat_cond OR seller_lng_cond) OR (customer_lat_cond OR customer_lng_cond)) AS route_suspicious
+
+FROM route_zip_quality
+)
+SELECT route_suspicious / orders_count * 100 AS suspicious_pct FROM route_quality_summary
+""")
+
+# %%
+con.sql("""
+WITH zip_tresholds AS ( 
+SELECT 
+    QUANTILE_CONT(lat_diff, 0.999) AS lat_diff_p999,
+    QUANTILE_CONT(lng_diff, 0.999) AS lng_diff_p999,
+FROM zip_coordinates
+),
+zip_quality AS (
+SELECT 
+    zip_prefix,
+    state,
+    lat_diff > lat_diff_p999 AS lat_cond,
+    lng_diff > lng_diff_p999 AS lng_cond
+FROM zip_coordinates
+    CROSS JOIN zip_tresholds
+),
+route_zip_quality AS (
+SELECT 
+    order_id,
+    seller_zip_code_prefix,
+    seller_state,
+    customer_zip_code_prefix,
+    customer_state,
+    straight_line_distance_km,
+    seller_quality.lat_cond AS seller_lat_cond,
+    seller_quality.lng_cond AS seller_lng_cond,
+    customer_quality.lat_cond AS customer_lat_cond,
+    customer_quality.lng_cond AS customer_lng_cond,
+    (
+        seller_lat_cond
+        OR seller_lng_cond
+        OR customer_lat_cond
+        OR customer_lng_cond
+    ) AS is_suspicious_route
+
+FROM route_distances rd
+    JOIN zip_quality seller_quality 
+        ON rd.seller_zip_code_prefix = seller_quality.zip_prefix
+        AND rd.seller_state = seller_quality.state
+    JOIN zip_quality customer_quality 
+        ON rd.customer_zip_code_prefix = customer_quality.zip_prefix
+        AND rd.customer_state = customer_quality.state
+)
+SELECT 
+    is_suspicious_route,
+    COUNT(*),
+    AVG(straight_line_distance_km),
+    MEDIAN(straight_line_distance_km),
+    MIN(straight_line_distance_km),
+    MAX(straight_line_distance_km),
+    QUANTILE_CONT(straight_line_distance_km, 0.99)
+    
+
+FROM route_zip_quality
+GROUP BY is_suspicious_route
+""")
+
+# %% [markdown]
+# #### Вывод: 
+# 63 маршрута (0,07%) связаны с ZIP-префиксами, имеющими экстремальный внутренний разброс координат. Эти маршруты в среднем длиннее остальных, однако их исключение практически не изменяет среднее, медиану и 99-й перцентиль расстояния. Максимальное расстояние остаётся аномальным, поскольку фильтр внутреннего разброса не обнаруживает согласованно ошибочные координаты. Поэтому экстремумы следует интерпретировать осторожно, тогда как основные характеристики распределения устойчивы к найденным аномалиям.
+
+# %% [markdown]
+# ### Связь расстояния и опоздания RJ
 
 # %%
