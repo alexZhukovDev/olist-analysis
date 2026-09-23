@@ -13,1137 +13,566 @@
 # ---
 
 # %% [markdown]
-# # Анализ продаж и выполнения заказов Olist
+# # Olist: продажи, доставка и клиентский опыт
 #
 # ## Цель проекта
 #
-# Оценить динамику продаж маркетплейса и качество выполнения заказов,
-# выявить проблемные периоды и факторы, связанные со сроками доставки
-# и удовлетворённостью покупателей.
+# Оценить динамику заказов маркетплейса Olist, измерить качество выполнения
+# доставки и определить факторы, связанные с опозданиями и оценками покупателей.
 #
-# ## Задачи
+# Основной бизнес-вопрос: **почему доля опозданий в штате Rio de Janeiro (RJ)
+# заметно выше, чем в São Paulo (SP), и на каком этапе возникает разрыв?**
 #
-# - исследовать динамику заказов, валовой стоимости и среднего чека;
-# - оценить долю успешно доставленных и незавершённых заказов;
-# - проанализировать сроки и опоздания доставки;
-# - проверить связь логистики с географией, категориями и отзывами;
-# - сформулировать выводы и ограничения анализа.
+# ## Единицы анализа и определения
+#
+# - Основная единица анализа — один заказ (`order_id`).
+# - GOV — стоимость товаров и доставки; это оборот заказов, а не бухгалтерская выручка или прибыль.
+# - Заказ считается опоздавшим, если календарная дата доставки позже обещанной даты.
+# - Анализ расстояния ограничен заказами с одним продавцом: для заказов с несколькими
+#   продавцами невозможно однозначно определить один маршрут.
+# - Прямолинейное расстояние рассчитано по медианным координатам ZIP-префиксов
+#   и не равно дорожному расстоянию.
 
 # %%
-import duckdb
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-
 from pathlib import Path
 
-# %%
-DATA_DIR = Path("../data/raw")
+import duckdb
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+from matplotlib.ticker import FuncFormatter
 
 # %%
+PROJECT_DIR = Path.cwd().resolve()
+if not (PROJECT_DIR / "data" / "raw").exists():
+    PROJECT_DIR = PROJECT_DIR.parent
+
+DATA_DIR = PROJECT_DIR / "data" / "raw"
+FIGURES_DIR = PROJECT_DIR / "reports" / "figures"
+FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+
+sns.set_theme(style="whitegrid", context="notebook")
+plt.rcParams["figure.dpi"] = 110
+plt.rcParams["axes.titleweight"] = "bold"
+
 con = duckdb.connect()
 
-# %%
-list(DATA_DIR.glob("*.csv"))
-
 # %% [markdown]
-# ### Загрузка и первичное знакомство с данными
+# ## 1. Загрузка и проверка данных
 
 # %%
-con.sql("""
-    SELECT * 
-    FROM read_csv_auto('../data/raw/olist_customers_dataset.csv') 
-    LIMIT 5
-""").df()
+TABLE_FILES = {
+    "customers": "olist_customers_dataset.csv",
+    "orders": "olist_orders_dataset.csv",
+    "order_items": "olist_order_items_dataset.csv",
+    "reviews": "olist_order_reviews_dataset.csv",
+    "products": "olist_products_dataset.csv",
+    "sellers": "olist_sellers_dataset.csv",
+    "geolocation": "olist_geolocation_dataset.csv",
+    "translation": "product_category_name_translation.csv",
+}
 
-# %%
-con.sql("""
-    CREATE VIEW customers AS 
-    SELECT *
-    FROM read_csv_auto('../data/raw/olist_customers_dataset.csv') 
-""")
+for view_name, filename in TABLE_FILES.items():
+    csv_path = (DATA_DIR / filename).as_posix().replace("'", "''")
+    con.execute(
+        f"""
+        CREATE OR REPLACE VIEW {view_name} AS
+        SELECT *
+        FROM read_csv_auto('{csv_path}')
+        """
+    )
 
-# %%
-con.sql("""
-    SELECT COUNT(*)
-    FROM customers
-""")
-
-# %%
-con.sql("""
-    CREATE VIEW orders AS 
-    SELECT * 
-    FROM read_csv_auto('../data/raw/olist_orders_dataset.csv')
-""")
-
-# %%
-con.sql("""
-    SELECT * 
-    FROM orders 
-    LIMIT 5
-""")
-
-# %%
-con.sql("""
-    SELECT COUNT(order_id) 
-    FROM orders 
-""")
-
-# %%
-con.sql("""
-    SELECT COUNT(DISTINCT order_id) 
-    FROM orders 
-""")
-
-# %%
-con.sql("""
-    SELECT order_status, COUNT(*)
-    FROM orders
-    GROUP BY order_status
-""")
-
-# %%
-con.sql("""
-    CREATE VIEW order_items AS 
-    SELECT * 
-    FROM read_csv_auto('../data/raw/olist_order_items_dataset.csv')
-""")
-
-# %%
-con.sql("""
-    SELECT DISTINCT COUNT(order_id) 
-    FROM order_items
-""")
-
-# %%
-con.sql("""
-    SELECT *
-    FROM order_items
-    LIMIT 5
-""")
-
-# %%
-con.sql("""
-    SELECT order_id, COUNT(*) as cnt, COUNT(DISTINCT product_id) as unique
-    FROM order_items
-    GROUP BY order_id
-    ORDER BY cnt DESC
-    LIMIT 10
-""")
-
-# %% [markdown]
-# ### Расчёт стоимости доставленных заказов
-
-# %%
-con.sql("""
-    SELECT DISTINCT order_item_id as id
-    FROM order_items
-    ORDER BY id desc
-""")
-
-# %%
-con.sql("""
-    SELECT order_id, order_purchase_timestamp, product_id, price, freight_value
-    FROM orders 
-        INNER JOIN order_items USING (order_id)
-    WHERE (order_status = 'delivered')
-""")
-
-# %%
-con.sql("""
-    SELECT order_id, order_purchase_timestamp, SUM(price + freight_value) AS order_total
-    FROM orders 
-        INNER JOIN order_items USING (order_id)
-    WHERE (order_status = 'delivered')
-    GROUP BY order_id, order_purchase_timestamp
-""")
-
-# %%
-con.sql("""
-WITH delivered_orders AS (
-SELECT order_id, order_purchase_timestamp, SUM(price + freight_value) AS order_total
-FROM orders 
-    INNER JOIN order_items USING (order_id)
-WHERE (order_status = 'delivered')
-GROUP BY order_id, order_purchase_timestamp
+overview = pd.DataFrame(
+    {
+        "table": list(TABLE_FILES),
+        "rows": [
+            con.sql(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            for table_name in TABLE_FILES
+        ],
+    }
 )
-    
-SELECT DATE_TRUNC('month', order_purchase_timestamp) AS month, COUNT(*) AS delivered_orders, SUM(order_total) AS revenue, AVG(order_total) AS average_order_value
-FROM delivered_orders
-GROUP BY month
-ORDER BY month ASC;
-
-""")
+overview
 
 # %%
-con.sql("""
-WITH delivered_orders AS (
-SELECT order_id, order_purchase_timestamp, SUM(price + freight_value) AS order_total
-FROM orders 
-    INNER JOIN order_items USING (order_id)
-WHERE (order_status = 'delivered')
-GROUP BY order_id, order_purchase_timestamp
-)
-        
-SELECT MIN(order_purchase_timestamp), MAX(order_purchase_timestamp)
-FROM delivered_orders
-""")
-
-# %%
-con.sql("""
-WITH all_orders AS (
-SELECT order_id, order_purchase_timestamp, SUM(price + freight_value) AS order_total
-FROM orders 
-    INNER JOIN order_items USING (order_id)
-GROUP BY order_id, order_purchase_timestamp
-)
-    
-SELECT DATE_TRUNC('month', order_purchase_timestamp) AS month, COUNT(*) AS all_orders, SUM(order_total) AS revenue, AVG(order_total) AS average_order_value
-FROM all_orders
-GROUP BY month
-ORDER BY month ASC;
-""")
-
-# %% [markdown]
-# ### Месячные метрики и MoM-динамика
-
-# %%
-con.sql("""
-WITH delivered_orders AS (
-SELECT 
-    order_id, 
-    order_purchase_timestamp, 
-    SUM(price + freight_value) AS order_total,
-    SUM(price) AS order_products_total,
-    SUM(freight_value) as order_freight_total
-FROM orders 
-    INNER JOIN order_items USING (order_id)
-WHERE (order_status = 'delivered')
-GROUP BY order_id, order_purchase_timestamp
-)
-    
-SELECT 
-    DATE_TRUNC('month', order_purchase_timestamp) AS month, 
-     COUNT(*) AS delivered_orders, 
-    SUM(order_total) AS gross_order_value, 
-    AVG(order_total) AS average_order_value,
-    SUM(order_products_total) AS montly_products_total,
-    SUM(order_freight_total) AS monthly_freight_total,
-    ROUND((monthly_freight_total * 100 / NULLIF(gross_order_value, 0)), 1) AS freight_share_pct
-FROM delivered_orders
-GROUP BY month
-ORDER BY month ASC;
-""").df()
-
-# %%
-con.sql("""
-WITH delivered_orders AS (
-SELECT 
-    order_id, 
-    order_purchase_timestamp, 
-    SUM(price + freight_value) AS order_total,
-    SUM(price) AS order_products_total,
-    SUM(freight_value) as order_freight_total
-FROM orders 
-    INNER JOIN order_items USING (order_id)
-WHERE (order_status = 'delivered')
-GROUP BY order_id, order_purchase_timestamp
-),
-monthly_metrics AS (
-SELECT 
-    DATE_TRUNC('month', order_purchase_timestamp) AS month, 
-     COUNT(*) AS delivered_orders, 
-    SUM(order_total) AS gross_order_value, 
-    AVG(order_total) AS average_order_value,
-    SUM(order_products_total) AS monthly_products_total,
-    SUM(order_freight_total) AS monthly_freight_total,
-    ROUND((monthly_freight_total * 100 / NULLIF(gross_order_value, 0)), 1) AS freight_share_pct
-FROM delivered_orders
-GROUP BY month
-),
-monthly_with_previous AS (
-    SELECT
-        month,
-        gross_order_value,
-        LAG(gross_order_value) OVER (ORDER BY month) AS previous_gov
-    FROM monthly_metrics
-    WHERE month >= DATE '2017-01-01'
-        AND month <= DATE '2018-08-01'
-)
-        
-SELECT 
-    month,
-    gross_order_value,
-    gross_order_value - previous_gov AS mom_abs_diff,
-    ROUND((gross_order_value - previous_gov) / NULLIF(previous_gov, 0) * 100, 1) AS mom_diff_pct
-FROM monthly_with_previous
-ORDER BY month;
-""")
-
-# %% [markdown]
-# Вывод: таблица показывает помесячную динамику валовой стоимости доставленных заказов (gross_order_value), включающей стоимость товаров и доставки, а также её абсолютное и процентное изменение относительно предыдущего месяца. Динамика неравномерна: встречаются как месяцы роста, так и месяцы снижения.
-# Основной период анализа начинается с января 2017 года. Данные за сентябрь–декабрь 2016 года фрагментарны: в сентябре и декабре присутствует только по одному доставленному заказу, а данные за ноябрь отсутствуют.
-# Август 2018 года включён в таблицу, однако требует осторожной интерпретации: последний доставленный заказ по дате оформления относится к 29 августа, хотя в исходной таблице существуют заказы от 30–31 августа. Поэтому августовские показатели доставленных заказов могут быть занижены.
-
-# %% [markdown]
-# ### Анализ статусов заказов
-
-# %%
-con.sql("""
-WITH monthly_order_status AS (
-SELECT 
-    DATE_TRUNC('month', order_purchase_timestamp) AS month, 
-    order_status,
-    COUNT(*) AS status_orders_count,
-    SUM(COUNT(*)) OVER (PARTITION BY month) AS all_orders_count,
-    ROUND(status_orders_count / (all_orders_count / 100), 1) AS share_pct,
-    MIN(order_purchase_timestamp),
-    MAX(order_purchase_timestamp)
-FROM orders
-GROUP BY month, order_status
-
-)
-        
-SELECT 
-    *
-FROM monthly_order_status
-ORDER BY month ASC
-""")
-
-# %%
-con.sql("""
+order_key_check = con.sql("""
 SELECT
-    order_status AS status,
-    COUNT(*) AS orders_count,
-    COUNT(*) FILTER (WHERE order_delivered_carrier_date IS NULL) AS missing_carrier_date,
-    COUNT(*) FILTER (WHERE order_delivered_customer_date IS NULL) AS missing_customer_date,
-    COUNT(*) FILTER (WHERE order_approved_at IS NOT NULL AND order_delivered_carrier_date IS NULL) AS stuck_before_shipping,
-    COUNT(*) FILTER (WHERE order_approved_at IS NOT NULL AND order_delivered_customer_date IS NULL AND order_delivered_carrier_date IS NOT NULL) AS stuck_in_delivery
-FROM orders
-WHERE order_status IN ('processing', 'invoiced', 'shipped')
-  AND order_purchase_timestamp < DATE '2017-12-01'
-GROUP BY status
-""")
-
-# %%
-con.sql("""
-WITH delivery_features AS (
-SELECT 
-    order_id, 
-    order_delivered_customer_date - order_purchase_timestamp AS delivery_time,
-    CAST(order_delivered_customer_date AS DATE) - CAST(order_estimated_delivery_date AS DATE) AS delay_days,
-    delay_days > 0 AS is_late
-FROM orders     
-WHERE (order_status = 'delivered')
-),
-late_count AS (
-SELECT 
-    is_late, 
-    COUNT(*) as orders_count,
-    SUM(COUNT(*)) OVER () AS total_cnt,
-    ROUND(orders_count * 100.0 / total_cnt, 2) AS late_pct
-FROM delivery_features
-WHERE is_late IS NOT NULL
-GROUP BY is_late
-)
-
-SELECT * FROM late_count
-""")
-
-# %% [markdown]
-# #### Среди заказов с известной датой доставки, **6.77%** заказов были доставлены позже обещанной календарной даты
-
-# %% [markdown]
-# ### Связь опозданий и ревью
-
-# %%
-con.sql("""
-    CREATE VIEW reviews AS 
-    SELECT *
-    FROM read_csv_auto('../data/raw/olist_order_reviews_dataset.csv') 
-""")
-
-# %%
-con.sql("""
-SELECT 
-    COUNT(DISTINCT review_id), 
-    COUNT(DISTINCT order_id), 
-    COUNT(*)
-FROM reviews
-""")
-
-# %%
-con.sql("""
-SELECT order_id, COUNT(*) AS reviews_count
-FROM reviews
-GROUP BY order_id
-HAVING COUNT(*) > 1
-ORDER BY reviews_count DESC;
-""")
-
-# %%
-con.sql("""
-SELECT
-    review_id,
     COUNT(*) AS rows_count,
-    COUNT(DISTINCT order_id) AS orders_count
-FROM reviews
-GROUP BY review_id
-HAVING COUNT(DISTINCT order_id) > 1
-ORDER BY orders_count DESC;
-""")
-
-# %%
-con.sql("""
-    SELECT *
-    FROM reviews
-    WHERE (review_id = '4d0e6dd087008d1f992d25ef6e1f619f')
-""")
-
-# %%
-con.sql("""
-SELECT 
-    review_score,
-    COUNT(*) as review_cnt,
-    SUM(COUNT(*)) OVER () AS total_reviews,
-    -- AVG(review_score) OVER (),
-    ROUND(review_cnt * 100 / total_reviews, 2) AS review_dist
-FROM orders 
-    INNER JOIN reviews USING (order_id)
-GROUP BY review_score
-ORDER BY review_score
-""")
-
-# %%
-con.sql("""
-WITH clean_reviews AS (
-SELECT COUNT(*)
-FROM reviews
-GROUP BY review_id
-HAVING COUNT(DISTINCT order_id) = 1
-)
-SELECT * FROM clean_reviews
-""")
-
-# %%
-con.sql("""
-WITH valid_review_ids AS (
-    SELECT
-        review_id
-    FROM reviews
-    GROUP BY review_id
-    HAVING COUNT(DISTINCT order_id) = 1
-),
-valid_reviews AS (
-SELECT reviews.*
-FROM reviews    
-    JOIN valid_review_ids USING (review_id)  
-),
-ranked_reviews AS (
-SELECT 
-    *,
-    ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY review_answer_timestamp DESC, review_id) as review_rank
-    FROM valid_reviews
-),
-clean_reviews AS (
-    SELECT *
-    FROM ranked_reviews
-    WHERE review_rank = 1
-), delivery_features AS (
-SELECT 
-    order_id, 
-    order_delivered_customer_date - order_purchase_timestamp AS delivery_time,
-    CAST(order_delivered_customer_date AS DATE) - CAST(order_estimated_delivery_date AS DATE) AS delay_days,
-    delay_days > 0 AS is_late
-FROM orders     
-WHERE (order_status = 'delivered') AND is_late IS NOT NULL
-)
-
-SELECT 
-    review_score, 
-    is_late, 
-    COUNT(*) as orders_count,
-    SUM(COUNT(*)) OVER (PARTITION BY is_late) AS total_cnt,
-    ROUND(orders_count * 100 / total_cnt, 2) AS share_within_delivery_group
-    FROM delivery_features 
-        JOIN clean_reviews USING (order_id)
-    GROUP BY is_late, review_score
-    ORDER BY is_late DESC, review_score DESC; 
+    COUNT(DISTINCT order_id) AS unique_orders,
+    COUNT(*) - COUNT(DISTINCT order_id) AS duplicate_order_ids
+FROM orders
 """).df()
+order_key_check
+
+# %% [markdown]
+# Таблица `orders` имеет grain **одна строка = один заказ**:
+# `order_id` уникален. В `order_items` одному заказу может соответствовать
+# несколько товаров, поэтому стоимость сначала агрегируется до уровня заказа.
 
 # %%
-con.sql("""
-WITH valid_review_ids AS (
-    SELECT
-        review_id
-    FROM reviews
-    GROUP BY review_id
-    HAVING COUNT(DISTINCT order_id) = 1
-),
-valid_reviews AS (
-SELECT reviews.*
-FROM reviews    
-    JOIN valid_review_ids USING (review_id)  
-),
-ranked_reviews AS (
-SELECT 
-    *,
-    ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY review_answer_timestamp DESC, review_id) as review_rank
-    FROM valid_reviews
-)
-SELECT * FROM ranked_reviews
-""")
-
-# %%
-con.sql("""
-WITH valid_review_ids AS (
-    SELECT
-        review_id
-    FROM reviews
-    GROUP BY review_id
-    HAVING COUNT(DISTINCT order_id) = 1
-),
-        
-valid_reviews AS (
-SELECT reviews.*
-FROM reviews    
-    JOIN valid_review_ids USING (review_id)  
-),
-        
-ranked_reviews AS (
-SELECT 
-    *,
-    ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY review_answer_timestamp DESC, review_id) as review_rank
-    FROM valid_reviews
-),
-        
-clean_reviews AS (
-    SELECT *
-    FROM ranked_reviews
-    WHERE review_rank = 1
-), 
-
-delivery_features AS (
-SELECT 
-    order_id, 
-    order_delivered_customer_date - order_purchase_timestamp AS delivery_time,
-    CAST(order_delivered_customer_date AS DATE) - CAST(order_estimated_delivery_date AS DATE) AS delay_days,
-    delay_days > 0 AS is_late
-FROM orders     
-WHERE (order_status = 'delivered') AND is_late IS NOT NULL
-),
-        
-bucketed_orders AS (
-SELECT 
-    df.order_id,
-    df.delay_days,
-    cr.review_score,
-    CASE 
-        WHEN df.delay_days = 1 THEN '1 day'
-        WHEN df.delay_days BETWEEN 2 AND 3 THEN '2-3 days'
-        WHEN df.delay_days BETWEEN 4 AND 7 THEN '4-7 days'
-        WHEN df.delay_days BETWEEN 8 AND 14 THEN '8-14 days'
-        WHEN df.delay_days BETWEEN 15 AND 30 THEN '15-30 days'
-        ELSE '31+ days'
-    END AS delay_bucket 
-FROM delivery_features AS df
-    INNER JOIN clean_reviews AS cr USING (order_id)
-WHERE df.is_late = true
-)
-    
+con.execute("""
+CREATE OR REPLACE TEMP VIEW delivery_features AS
 SELECT
-    delay_bucket,
-    COUNT(*) AS orders_count,
-    ROUND(AVG(review_score), 2) AS average_review_score
-FROM bucketed_orders
-GROUP BY delay_bucket
-ORDER BY MIN(delay_days)
-""").df()
-
-# %% [markdown]
-# #### Вывод: с увеличением длительности задержки средняя оценка заказа в целом снижается. Для заказов, доставленных вовремя, оценка составялет 4.29 балла, при задержке в один день - 3.74, а при задержке 15-30 дней - 1.61. Наиболее заметное снижение наблюдается за первую неделю опоздания: средняя оценка падает с 3.74 при задержке на один день до 2.11 при задержке на 4-7 дней.
-#
-# #### На всём диапазоне зависимость не является строго монотонной: для задержке свыше 30 дней средняя оценка повышается до 2.05. Это может быть связано с составом группы и широким интервалом 31+, поэтому результат не следует интерпретировать как улучшение клиентского опыта при экстремальных задержках
-
-# %% [markdown]
-# ### Связь логистики и географии
-
-# %%
-con.sql("""
-SELECT COUNT(DISTINCT customer_id) 
-FROM customers
+    order_id,
+    customer_id,
+    order_purchase_timestamp,
+    order_delivered_carrier_date,
+    order_delivered_customer_date,
+    order_estimated_delivery_date,
+    EXTRACT(
+        EPOCH FROM (order_delivered_customer_date - order_purchase_timestamp)
+    ) / 86400.0 AS delivery_days,
+    CAST(order_delivered_customer_date AS DATE)
+        - CAST(order_estimated_delivery_date AS DATE) AS delay_days,
+    delay_days > 0 AS is_late
+FROM orders
+WHERE order_status = 'delivered'
+  AND order_delivered_customer_date IS NOT NULL
+  AND order_estimated_delivery_date IS NOT NULL
 """)
 
-# %%
-con.sql("""
-WITH delivery_features AS (
-SELECT 
-    order_id, 
-    EXTRACT(
-        EPOCH FROM (
-            order_delivered_customer_date - order_purchase_timestamp
-        )
-    ) / 86400.0 AS delivery_days,
-    CAST(order_delivered_customer_date AS DATE) - CAST(order_estimated_delivery_date AS DATE) AS delay_days,
-    delay_days > 0 AS is_late
-FROM orders     
-WHERE (order_status = 'delivered') AND is_late IS NOT NULL
-)
-        
-SELECT 
-    customer_state,
-    COUNT(*) FILTER (WHERE is_late = true) as late_orders,
-    COUNT(*) AS delivered_orders,
-    late_orders / NULLIF(delivered_orders, 0) * 100 late_share_pct,
-    ROUND(AVG(delivery_days), 2) average_delivery_time
-FROM delivery_features df
-    JOIN orders USING (order_id)
-    JOIN customers USING (customer_id)
-GROUP BY customer_state
-ORDER BY delivered_orders DESC, late_share_pct DESC;
-""")
+# %% [markdown]
+# ## 2. Динамика заказов и GOV
 
 # %%
-state_metrics = con.sql("""
-WITH delivery_features AS (
-SELECT 
-    order_id, 
-    EXTRACT(
-        EPOCH FROM (
-            order_delivered_customer_date - order_purchase_timestamp
-        )
-    ) / 86400.0 AS delivery_days,
-    CAST(order_delivered_customer_date AS DATE) - CAST(order_estimated_delivery_date AS DATE) AS delay_days,
-    delay_days > 0 AS is_late
-FROM orders     
-WHERE (order_status = 'delivered') AND is_late IS NOT NULL
+monthly_metrics = con.sql("""
+WITH delivered_orders AS (
+    SELECT
+        o.order_id,
+        o.order_purchase_timestamp,
+        SUM(oi.price) AS products_total,
+        SUM(oi.freight_value) AS freight_total,
+        SUM(oi.price + oi.freight_value) AS gross_order_value
+    FROM orders AS o
+    JOIN order_items AS oi USING (order_id)
+    WHERE o.order_status = 'delivered'
+    GROUP BY o.order_id, o.order_purchase_timestamp
+),
+monthly AS (
+    SELECT
+        DATE_TRUNC('month', order_purchase_timestamp) AS month,
+        COUNT(*) AS delivered_orders,
+        SUM(gross_order_value) AS gross_order_value,
+        AVG(gross_order_value) AS average_order_value,
+        SUM(products_total) AS products_total,
+        SUM(freight_total) AS freight_total,
+        100.0 * SUM(freight_total)
+            / NULLIF(SUM(gross_order_value), 0) AS freight_share_pct
+    FROM delivered_orders
+    GROUP BY month
+),
+analysis_period AS (
+    SELECT *
+    FROM monthly
+    WHERE month BETWEEN DATE '2017-01-01' AND DATE '2018-08-01'
+),
+with_previous AS (
+    SELECT
+        *,
+        LAG(gross_order_value) OVER (ORDER BY month) AS previous_month_gov
+    FROM analysis_period
 )
-        
-SELECT 
-    customer_state,
-    COUNT(*) FILTER (WHERE is_late = true) as late_orders,
-    COUNT(*) AS delivered_orders,
-    late_orders / NULLIF(delivered_orders, 0) * 100 late_share_pct,
-    ROUND(AVG(delivery_days), 2) average_delivery_time
-FROM delivery_features df
-    JOIN orders USING (order_id)
-    JOIN customers USING (customer_id)
-GROUP BY customer_state
-ORDER BY delivered_orders DESC, late_share_pct DESC;
+SELECT
+    month,
+    delivered_orders,
+    ROUND(gross_order_value, 2) AS gross_order_value,
+    ROUND(average_order_value, 2) AS average_order_value,
+    ROUND(products_total, 2) AS products_total,
+    ROUND(freight_total, 2) AS freight_total,
+    ROUND(freight_share_pct, 2) AS freight_share_pct,
+    ROUND(
+        100.0 * (gross_order_value - previous_month_gov)
+        / NULLIF(previous_month_gov, 0),
+        2
+    ) AS mom_gov_pct
+FROM with_previous
+ORDER BY month
 """).df()
 
-# %%
-plot_data = (
-    state_metrics
-    .query("delivered_orders >= 500")
-    .sort_values("late_share_pct")
-    .copy()
-)
-
-plot_data["state_label"] = (
-    plot_data["customer_state"]
-    + " (n="
-    + plot_data["delivered_orders"].astype(str)
-    + ")"
-)
+monthly_metrics
 
 # %%
-fig, ax = plt.subplots(figsize=(9, 7))
+monthly_plot = monthly_metrics.copy()
+monthly_plot["month"] = pd.to_datetime(monthly_plot["month"])
 
-sns.barplot(
-    data=plot_data,
-    x="late_share_pct",
-    y="state_label",
-    color="steelblue",
-    ax=ax
+fig, axes = plt.subplots(2, 1, figsize=(11, 8), sharex=True)
+
+sns.lineplot(
+    data=monthly_plot,
+    x="month",
+    y="gross_order_value",
+    marker="o",
+    color="#3478a8",
+    ax=axes[0],
+)
+axes[0].set(
+    title="Динамика GOV доставленных заказов",
+    xlabel="",
+    ylabel="GOV, млн R$",
+)
+axes[0].yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value / 1_000_000:.1f}"))
+
+sns.lineplot(
+    data=monthly_plot,
+    x="month",
+    y="delivered_orders",
+    marker="o",
+    color="#e07a3f",
+    ax=axes[1],
+)
+axes[1].set(
+    title="Количество доставленных заказов",
+    xlabel="Месяц оформления заказа",
+    ylabel="Заказы",
 )
 
-ax.bar_label(
-    ax.containers[0],
-    fmt="%.1f%%",
-    padding=3
-)
+for ax in axes:
+    ax.grid(axis="x", visible=False)
+    sns.despine(ax=ax)
 
-ax.set(
-    title="Доля опоздавших доставок по штатам",
-    xlabel="Доля опоздавших заказов, %",
-    ylabel="Штат и количество доставленных заказов"
-)
-
-sns.despine()
-plt.tight_layout()
+fig.tight_layout()
+fig.savefig(FIGURES_DIR / "monthly-dynamics.png", bbox_inches="tight")
 plt.show()
 
 # %% [markdown]
-# ### Связь логистики и категорий товаров
-
-# %%
-con.sql("""
-    CREATE VIEW products AS 
-    SELECT *
-    FROM read_csv_auto('../data/raw/olist_products_dataset.csv') 
-""")
-
-# %%
-con.sql("""
-    CREATE VIEW translation AS 
-    SELECT *
-    FROM read_csv_auto('../data/raw/product_category_name_translation.csv') 
-""")
-
-# %%
-con.sql("""
-WITH order_category_counts AS (
-SELECT 
-    order_id,
-    COUNT(DISTINCT product_category_name) as categories_count,
-FROM order_items
-    JOIN products USING (product_id)
-GROUP BY order_id
-)
-SELECT 
-    CASE 
-        WHEN categories_count = 1 THEN 'one_category' 
-        WHEN categories_count > 1 THEN 'few_categories' 
-        ELSE 'unknown_category'
-    END AS category_group,
-    COUNT(*) AS orders_count
-FROM order_category_counts
-GROUP BY category_group
-""")
-
-# %%
-con.sql("""
-WITH order_categories AS (
-SELECT DISTINCT 
-    order_id, 
-    COALESCE(
-        t.product_category_name_english,
-        p.product_category_name) as category
-FROM order_items oi 
-    JOIN products p USING (product_id)
-    LEFT JOIN translation t ON p.product_category_name = t.product_category_name
-),
-delivery_features AS (
-SELECT 
-    order_id, 
-    EXTRACT(
-        EPOCH FROM (
-            order_delivered_customer_date - order_purchase_timestamp
-        )
-    ) / 86400.0 AS delivery_days,
-    CAST(order_delivered_customer_date AS DATE) - CAST(order_estimated_delivery_date AS DATE) AS delay_days,
-    delay_days > 0 AS is_late
-FROM orders     
-WHERE (order_status = 'delivered') AND is_late IS NOT NULL
-)
-        
-SELECT 
-    category, 
-    COUNT(*) AS delivered_orders,
-    COUNT(*) FILTER (WHERE is_late = TRUE) AS late_orders,
-    ROUND((late_orders / delivered_orders) * 100, 2) AS late_share_pct,
-    ROUND(AVG(delivery_days), 2) AS average_delivery_days
-FROM order_categories oc
-    JOIN delivery_features USING (order_id)
-WHERE (category IS NOT NULL)
-GROUP BY category
-HAVING (delivered_orders > 500)
-ORDER BY late_share_pct DESC, delivered_orders DESC;
-""")
+# Период с января 2017 года показывает неравномерный рост объёма заказов и GOV:
+# месяцы роста чередуются со снижениями. Сентябрь–декабрь 2016 года исключены
+# из основного сравнения из-за фрагментарности. Август 2018 года оставлен,
+# но интерпретируется осторожно: последние оформленные и впоследствии доставленные
+# заказы относятся к 29 августа.
 
 # %% [markdown]
-# #### Среди массовых категорий не обнаружено экстремально высокой доли опозданий. Категории bebes, eletronicos, beleza_saude, cama_mesa_banho и relogios_presentes умеренно превышают общий уровень задержек. Наиболее заметно выделяется moveis_escritorio: помимо доли опозданий выше среднего, эта категория имеет средний срок доставки 20,64 дня, что существенно выше большинства массовых категорий.
-# #### Наблюдаемые различия не позволяют считать категорию непосредственной причиной задержек: они могут быть связаны с габаритами товаров, расположением продавцов и покупателей или особенностями обработки заказов.
-
-# %% [markdown]
-# ## Выводы:
-#
-# ### Опоздания и отзывы:
-# **Наблюдение:** с увеличением длительности задержки доставки средняя оценка заказа в целом снижается. Для заказов, доставленных вовремя, оценка составялет 4,29 балла, при задержке в один день - 3,74, а при задержке 15-30 дней - 1,61.
-#
-# **Возможное объяснение:** задержка доставки может ухудшать клиентский опыт и быть одной из причин более низкой оценки товара
-#
-# **Ограничение:** на оценку может влиять не только задержка доставки, но и, например, качество товара
-#
-# **Рекомендация:** рекомендуется в первую очередь выяснить основные причины задержек доставки, поскольку уже в течение первой недели опоздания средняя оценка снижается с 4,29 для своевременно доставленных заказов до 2,11 для заказов с задержкой 4–7 дней.
-#
-# ### География: 
-# **Наблюдение:** штат SP, в который было доставлено наибольшее количество заказов, имеет долю опоздавших доставленных заказов около 4,5%, тогда как штаты RJ, BA, CE, MA имеют заметно более высокую долю опозданий, например для RJ доля заказов, доставленных не в срок, составила 12,1%
-#
-# **Возможное объяснение:** различия могут быть связаны с расстоянием между продавцами и покупателями, распределением продавцов по регионам и особенностями региональной логистической инфраструктуры.
-#
-# **Ограничение:** нельзя утверждать точную причину задержек логистики из имеющейся статистики.
-#
-# **Рекомендация:** в первую очередь рекомендуется подробнее исследовать доставки в штат RJ, проверив связь опозданий с расстоянием между продавцами и покупателями, поскольку штат сочетает большой объём заказов и высокую долю доставок с нарушением обещанного срока.
-
-# %% [markdown]
-# ### Анализ связи географии и опозданий. 
-# Вопрос: почему RJ имеет долю опозданий доставок почти в 2.7 раза выше, чем штата SP?
+# ## 3. Выполнение заказов и опоздания
 
 # %%
-con.sql("""
-    CREATE VIEW sellers AS 
-    SELECT *
-    FROM read_csv_auto('../data/raw/olist_sellers_dataset.csv') 
-""")
-con.sql("""
-    CREATE VIEW geolocation AS 
-    SELECT *
-    FROM read_csv_auto('../data/raw/olist_geolocation_dataset.csv') 
-""")
-
-# %%
-con.sql("""
-SELECT 
-    geolocation_zip_code_prefix, 
-    COUNT(*) as sum_count,
-    COUNT(DISTINCT geolocation_lat)
-FROM geolocation
-GROUP BY geolocation_zip_code_prefix
-ORDER BY geolocation_zip_code_prefix ASC;
-""")
-
-# %%
-con.sql("""
-SELECT 
-    COUNT(*), 
-    COUNT(DISTINCT geolocation_zip_code_prefix)
-FROM geolocation
-""")
-
-# %%
-con.sql("""
-WITH zip_coordinates AS (
-    SELECT 
-        geolocation_zip_code_prefix AS zip_prefix,
-        MIN(geolocation_lat) AS min_lat,
-        MAX(geolocation_lat) AS max_lat,
-        MIN(geolocation_lng) AS min_lng,
-        MAX(geolocation_lng) AS max_lng,
-        MEDIAN(geolocation_lat) AS median_lat,
-        MEDIAN(geolocation_lng) AS median_lng,
-        AVG(geolocation_lat) AS avg_lat,
-        AVG(geolocation_lng) AS avg_lng,
-        (max_lat - min_lat) AS lat_diff,
-        (max_lng - min_lng) AS lng_diff,
-        ABS(avg_lat - median_lat),
-        ABS(avg_lng - median_lng),
-    FROM geolocation
-    GROUP BY geolocation_zip_code_prefix
-)
-
-SELECT 
-    *
-FROM zip_coordinates
-ORDER BY lat_diff DESC, lng_diff DESC;
-""")
-
-# %% [markdown]
-# Таблица геолокации содержит несколько координат для одного zip-префикса и отдельные экстремальные значения. Для уменьшения влияния выбросов координаты агрегированы медианой. Полученная точка представляет приблизительное местоположение префикса, а не точный адрес.
-
-# %%
-con.sql("""
-DESCRIBE customers;
-""")
-
-# %%
-con.sql("""
-DESCRIBE sellers;
-""")
-
-# %%
-con.sql("""
-DESCRIBE geolocation;
-""")
-
-# %%
-con.sql("""
-SELECT 
-    COUNT(*),
-    COUNT(DISTINCT customer_zip_code_prefix) 
-FROM customers
-""")
-
-# %%
-con.sql("""
-SELECT 
-    COUNT(*),
-    COUNT(DISTINCT seller_zip_code_prefix) 
-FROM sellers
-""")
-
-# %%
-con.sql("""
-WITH zip_coordinates AS (
-    SELECT 
-        geolocation_zip_code_prefix AS zip_prefix,
-        MEDIAN(geolocation_lat) AS latitude,
-        MEDIAN(geolocation_lng) AS longitude,
-    FROM geolocation
-    GROUP BY geolocation_zip_code_prefix
-)
-SELECT 
-    COUNT(*) customers_count,
-    COUNT(*) FILTER (WHERE latitude IS NOT NULL) lat,
-    COUNT(*) FILTER (WHERE longitude IS NOT NULL) lng,
-    COUNT(*) FILTER (WHERE zc.zip_prefix IS NULL) null_zip_prefix,
-    ROUND(null_zip_prefix / customers_count * 100, 2) AS pct_missing
-FROM customers c
-    LEFT JOIN zip_coordinates zc ON c.customer_zip_code_prefix = zc.zip_prefix
-""")
-
-# %%
-con.sql("""
-WITH zip_coordinates AS (
-    SELECT 
-        geolocation_zip_code_prefix AS zip_prefix,
-        MEDIAN(geolocation_lat) AS latitude,
-        MEDIAN(geolocation_lng) AS longitude,
-    FROM geolocation
-    GROUP BY geolocation_zip_code_prefix
-)
-SELECT 
-    COUNT(*) AS sellers_count,
-    COUNT(*) FILTER (WHERE latitude IS NOT NULL) lat,
-    COUNT(*) FILTER (WHERE longitude IS NOT NULL) lng,
-    COUNT(*) FILTER (WHERE zc.zip_prefix IS NULL) null_zip_prefix,
-    ROUND(null_zip_prefix / sellers_count * 100, 2) AS pct_missing
-FROM sellers s
-    LEFT JOIN zip_coordinates zc ON s.seller_zip_code_prefix = zc.zip_prefix
-""")
-
-# %%
-con.sql("""
-WITH order_sellers AS (
-    SELECT 
-        order_id,
-        seller_id
-    FROM order_items
-    GROUP BY order_id, seller_id
-),
-order_seller_count AS (
-    SELECT 
-        order_id,
-        COUNT(seller_id) AS seller_count 
-    FROM order_sellers
-    GROUP BY order_id
-)
-SELECT 
+status_distribution = con.sql("""
+SELECT
+    order_status,
     COUNT(*) AS orders_count,
-    CASE 
-        WHEN seller_count = 1 THEN 'One_seller'
-        WHEN seller_count > 1 THEN 'Multiple_sellers'
-    ELSE 'Not Found'
-    END AS seller_count_group
-FROM order_seller_count
-GROUP BY seller_count_group
+    ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS share_pct
+FROM orders
+GROUP BY order_status
+ORDER BY orders_count DESC
+""").df()
+status_distribution
+
+# %%
+late_summary = con.sql("""
+SELECT
+    CASE WHEN is_late THEN 'Late' ELSE 'On time' END AS delivery_status,
+    COUNT(*) AS orders_count,
+    ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS share_pct
+FROM delivery_features
+GROUP BY is_late
+ORDER BY is_late
+""").df()
+late_summary
+
+# %% [markdown]
+# Среди доставленных заказов с известными фактической и обещанной датами
+# **6,77% были доставлены позже обещанной календарной даты**.
+
+# %% [markdown]
+# ## 4. Опоздания и отзывы
+#
+# В таблице отзывов встречаются повторения и случаи, когда один `review_id`
+# связан с несколькими заказами. Сначала исключаются неоднозначные идентификаторы,
+# затем для каждого заказа сохраняется последний отзыв по времени ответа.
+# Это аналитическое допущение: последний отзыв считается наиболее актуальным.
+
+# %%
+con.execute("""
+CREATE OR REPLACE TEMP VIEW clean_reviews AS
+WITH valid_review_ids AS (
+    SELECT review_id
+    FROM reviews
+    GROUP BY review_id
+    HAVING COUNT(DISTINCT order_id) = 1
+),
+ranked_reviews AS (
+    SELECT
+        r.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY r.order_id
+            ORDER BY r.review_answer_timestamp DESC, r.review_id
+        ) AS review_rank
+    FROM reviews AS r
+    JOIN valid_review_ids USING (review_id)
+)
+SELECT *
+FROM ranked_reviews
+WHERE review_rank = 1
 """)
 
 # %%
-distance = con.sql("""
-WITH order_sellers AS (
-    SELECT 
-        order_id,
-        seller_id
-    FROM order_items
-    GROUP BY order_id, seller_id
-),
-order_seller_count AS (
+review_quality_check = con.sql("""
+SELECT
+    COUNT(*) AS rows_count,
+    COUNT(DISTINCT order_id) AS unique_orders,
+    COUNT(*) - COUNT(DISTINCT order_id) AS duplicate_orders
+FROM clean_reviews
+""").df()
+review_quality_check
+
+# %%
+delay_review_metrics = con.sql("""
+WITH bucketed AS (
     SELECT
-        order_id,
-        COUNT(seller_id) AS seller_count
-    FROM order_sellers
-    GROUP BY order_id
-),
-zip_coordinates AS (
-    SELECT 
-        geolocation_zip_code_prefix AS zip_prefix,
-        MEDIAN(geolocation_lat) AS latitude,
-        MEDIAN(geolocation_lng) AS longitude,
-    FROM geolocation
-    GROUP BY geolocation_zip_code_prefix
-),
-route_coordinates AS (
-SELECT
-    order_id,
-    seller_id,
-    customers.customer_id,
-    customer_state,
-    seller_zip_code_prefix,
-    customer_zip_code_prefix,
-    seller_geo.latitude AS seller_latitude,
-    seller_geo.longitude AS seller_longitude,
-    customer_geo.latitude AS customer_latitude,
-    customer_geo.longitude AS customer_longitude
-FROM order_sellers
-    JOIN orders USING (order_id)
-    JOIN sellers USING (seller_id)
-    JOIN customers 
-        ON orders.customer_id = customers.customer_id
-    JOIN order_seller_count osc USING (order_id)
-    LEFT JOIN zip_coordinates seller_geo 
-        ON seller_geo.zip_prefix = sellers.seller_zip_code_prefix
-    LEFT JOIN zip_coordinates customer_geo 
-        ON customer_geo.zip_prefix = customers.customer_zip_code_prefix 
-WHERE osc.seller_count = 1
-),
-coordinates_radians AS ( 
-SELECT
-    order_id,
-    seller_id,
-    customer_state,
-    seller_latitude,
-    seller_longitude,
-    customer_latitude,
-    customer_longitude,
-    RADIANS(seller_latitude) AS seller_lat_rad,
-    RADIANS(seller_longitude) AS seller_lng_rad,
-    RADIANS(customer_latitude) AS customer_lat_rad,
-    RADIANS(customer_longitude) AS customer_lng_rad
-FROM route_coordinates rc
-WHERE (rc.seller_latitude IS NOT NULL AND rc.customer_latitude IS NOT NULL AND rc.seller_longitude IS NOT NULL AND rc.customer_longitude IS NOT NULL)
-),
-haversine_components AS (
-SELECT
-    order_id,
-    seller_id,
-    customer_state,
-    customer_lat_rad - seller_lat_rad AS delta_lat,
-    customer_lng_rad - seller_lng_rad AS delta_lng,
-    POW(SIN(delta_lat / 2), 2) + COS(seller_lat_rad) * COS(customer_lat_rad) * POW(SIN(delta_lng / 2), 2) AS a
-FROM coordinates_radians
-ORDER BY a
-),
-route_distances AS (
-SELECT 
-    order_id,
-    rc.seller_id,
-    rc.customer_state,
-    seller_zip_code_prefix,
-    customer_zip_code_prefix,
-    seller_latitude,
-    seller_longitude,
-    customer_latitude,
-    customer_longitude,
-    6371 * 2 * ASIN(SQRT(a)) AS distance_km
-FROM haversine_components     
-    JOIN route_coordinates rc USING (order_id)
+        df.order_id,
+        cr.review_score,
+        df.delay_days,
+        CASE
+            WHEN df.delay_days <= 0 THEN 0
+            WHEN df.delay_days = 1 THEN 1
+            WHEN df.delay_days BETWEEN 2 AND 3 THEN 2
+            WHEN df.delay_days BETWEEN 4 AND 7 THEN 3
+            WHEN df.delay_days BETWEEN 8 AND 14 THEN 4
+            WHEN df.delay_days BETWEEN 15 AND 30 THEN 5
+            ELSE 6
+        END AS delay_bucket_num,
+        CASE
+            WHEN df.delay_days <= 0 THEN 'On time'
+            WHEN df.delay_days = 1 THEN '1 day'
+            WHEN df.delay_days BETWEEN 2 AND 3 THEN '2–3 days'
+            WHEN df.delay_days BETWEEN 4 AND 7 THEN '4–7 days'
+            WHEN df.delay_days BETWEEN 8 AND 14 THEN '8–14 days'
+            WHEN df.delay_days BETWEEN 15 AND 30 THEN '15–30 days'
+            ELSE '31+ days'
+        END AS delay_bucket
+    FROM delivery_features AS df
+    JOIN clean_reviews AS cr USING (order_id)
 )
-SELECT distance_km FROM route_distances
-ORDER BY distance_km
+SELECT
+    delay_bucket_num,
+    delay_bucket,
+    COUNT(*) AS orders_count,
+    ROUND(AVG(review_score), 2) AS average_review_score
+FROM bucketed
+GROUP BY delay_bucket_num, delay_bucket
+ORDER BY delay_bucket_num
 """).df()
 
-# %%
-sns.histplot(distance)
+delay_review_metrics
 
 # %%
-con.sql("""
+fig, ax = plt.subplots(figsize=(10, 5.5))
+
+bars = sns.barplot(
+    data=delay_review_metrics,
+    x="delay_bucket",
+    y="average_review_score",
+    color="#4c92c3",
+    ax=ax,
+)
+
+for bar, row in zip(bars.patches, delay_review_metrics.itertuples(), strict=True):
+    ax.text(
+        bar.get_x() + bar.get_width() / 2,
+        bar.get_height() + 0.08,
+        f"{row.average_review_score:.2f}\nn={row.orders_count:,}",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+    )
+
+ax.set(
+    title="Средняя оценка снижается с длительностью опоздания",
+    xlabel="Опоздание относительно обещанной даты",
+    ylabel="Средняя оценка, 1–5",
+    ylim=(0, 5),
+)
+sns.despine(ax=ax)
+fig.tight_layout()
+fig.savefig(FIGURES_DIR / "delay-and-review-score.png", bbox_inches="tight")
+plt.show()
+
+# %% [markdown]
+# Средняя оценка составляет 4,29 для своевременно доставленных заказов,
+# 3,74 при задержке на один день и 1,61 при задержке на 15–30 дней.
+# Наиболее резкое снижение наблюдается уже в первую неделю. Связь не доказывает
+# причинность: на оценку также влияют качество товара, продавец и коммуникация.
+
+# %% [markdown]
+# ## 5. География и категории
+
+# %%
+state_metrics = con.sql("""
+SELECT
+    c.customer_state,
+    COUNT(*) AS delivered_orders,
+    COUNT(*) FILTER (WHERE df.is_late) AS late_orders,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE df.is_late) / COUNT(*),
+        2
+    ) AS late_share_pct,
+    ROUND(AVG(df.delivery_days), 2) AS average_delivery_days
+FROM delivery_features AS df
+JOIN customers AS c
+    ON df.customer_id = c.customer_id
+GROUP BY c.customer_state
+ORDER BY delivered_orders DESC
+""").df()
+state_metrics
+
+# %%
+state_plot = (
+    state_metrics.query("delivered_orders >= 500")
+    .sort_values("late_share_pct")
+    .copy()
+)
+state_plot["state_label"] = (
+    state_plot["customer_state"]
+    + " (n="
+    + state_plot["delivered_orders"].map("{:,}".format)
+    + ")"
+)
+
+fig, ax = plt.subplots(figsize=(10, 7))
+bars = sns.barplot(
+    data=state_plot,
+    x="late_share_pct",
+    y="state_label",
+    color="#4c92c3",
+    ax=ax,
+)
+ax.bar_label(bars.containers[0], fmt="%.1f%%", padding=3, fontsize=9)
+ax.axvline(6.77, color="#d06449", linestyle="--", linewidth=1.5, label="Общий уровень: 6,77%")
+ax.set(
+    title="Доля опозданий по штатам с 500+ доставленными заказами",
+    xlabel="Опоздавшие заказы, %",
+    ylabel="Штат покупателя",
+)
+ax.legend(frameon=False)
+sns.despine(ax=ax)
+fig.tight_layout()
+fig.savefig(FIGURES_DIR / "late-share-by-state.png", bbox_inches="tight")
+plt.show()
+
+# %% [markdown]
+# SP сочетает наибольший объём доставленных заказов и сравнительно низкую долю
+# опозданий — около 4,5%. В RJ доля составляет около 12,1%, поэтому этот штат
+# выбран для дальнейшего исследования.
+
+# %%
+category_metrics = con.sql("""
+WITH order_categories AS (
+    SELECT DISTINCT
+        oi.order_id,
+        COALESCE(
+            t.product_category_name_english,
+            p.product_category_name
+        ) AS category
+    FROM order_items AS oi
+    JOIN products AS p USING (product_id)
+    LEFT JOIN translation AS t
+        ON p.product_category_name = t.product_category_name
+)
+SELECT
+    oc.category,
+    COUNT(*) AS delivered_orders,
+    COUNT(*) FILTER (WHERE df.is_late) AS late_orders,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE df.is_late) / COUNT(*),
+        2
+    ) AS late_share_pct,
+    ROUND(AVG(df.delivery_days), 2) AS average_delivery_days
+FROM order_categories AS oc
+JOIN delivery_features AS df USING (order_id)
+WHERE oc.category IS NOT NULL
+GROUP BY oc.category
+HAVING COUNT(*) > 500
+ORDER BY late_share_pct DESC, delivered_orders DESC
+""").df()
+category_metrics
+
+# %% [markdown]
+# Среди массовых категорий нет одного экстремального лидера по доле опозданий.
+# `office_furniture` выделяется длительным средним сроком доставки — около
+# 20,6 дня. Категорию нельзя считать непосредственной причиной: различия могут
+# быть связаны с габаритами, географией продавцов и составом заказов.
+#
+# Заказы с несколькими категориями входят в каждую соответствующую категорию,
+# поэтому строки этой таблицы не являются взаимоисключающими группами.
+
+# %% [markdown]
+# ## 6. Почему RJ опаздывает чаще?
+
+# %% [markdown]
+# ### 6.1 Подготовка приблизительных расстояний
+#
+# В таблице геолокации один ZIP-префикс может иметь несколько координат.
+# Для каждой комбинации ZIP + штат используется медианная широта и долгота.
+
+# %%
+con.execute("""
 CREATE OR REPLACE TEMP VIEW zip_coordinates AS
-
-SELECT 
+SELECT
     geolocation_zip_code_prefix AS zip_prefix,
-    geolocation_state as state,
+    geolocation_state AS state,
     MEDIAN(geolocation_lat) AS latitude,
     MEDIAN(geolocation_lng) AS longitude,
-    MIN(geolocation_lat) AS min_lat,
-    MAX(geolocation_lat) AS max_lat,
-    MIN(geolocation_lng) AS min_lng,
-    MAX(geolocation_lng) AS max_lng,
-    AVG(geolocation_lat) AS avg_lat,
-    AVG(geolocation_lng) AS avg_lng,
-    (max_lat - min_lat) AS lat_diff,
-    (max_lng - min_lng) AS lng_diff,
-    ABS(avg_lat - latitude) lat_avg_median_diff,
-    ABS(avg_lng - longitude) lng_avg_median_diff,
-
-    COUNT(*) as count_coordinates
+    MAX(geolocation_lat) - MIN(geolocation_lat) AS lat_diff,
+    MAX(geolocation_lng) - MIN(geolocation_lng) AS lng_diff,
+    COUNT(*) AS coordinate_rows
 FROM geolocation
 GROUP BY geolocation_zip_code_prefix, geolocation_state
 """)
 
 # %%
-con.sql("""
-SELECT * FROM zip_coordinates
-""")
-
-# %%
-con.sql("""
+con.execute("""
 CREATE OR REPLACE TEMP VIEW route_distances AS
-
 WITH order_sellers AS (
-    SELECT 
-        order_id,
-        seller_id
+    SELECT DISTINCT order_id, seller_id
     FROM order_items
-    GROUP BY order_id, seller_id
 ),
-order_seller_count AS (
-    SELECT
-        order_id,
-        COUNT(seller_id) AS seller_count
+single_seller_orders AS (
+    SELECT order_id, MIN(seller_id) AS seller_id
     FROM order_sellers
     GROUP BY order_id
+    HAVING COUNT(*) = 1
 ),
 route_coordinates AS (
-SELECT
-    order_id,
-    sellers.seller_id,
-    customers.customer_id,
-    customer_state,
-    seller_state,
-    seller_zip_code_prefix,
-    customer_zip_code_prefix,
-    seller_geo.latitude AS seller_latitude,
-    seller_geo.longitude AS seller_longitude,
-    customer_geo.latitude AS customer_latitude,
-    customer_geo.longitude AS customer_longitude
-FROM order_sellers
-    JOIN orders USING (order_id)
-    JOIN sellers ON order_sellers.seller_id = sellers.seller_id
-    JOIN customers ON orders.customer_id = customers.customer_id
-    JOIN order_seller_count osc USING (order_id)
-    LEFT JOIN zip_coordinates seller_geo 
-        ON seller_geo.zip_prefix = sellers.seller_zip_code_prefix
-        AND seller_geo.state = sellers.seller_state
-    LEFT JOIN zip_coordinates customer_geo 
-        ON customer_geo.zip_prefix = customers.customer_zip_code_prefix 
-        AND customer_geo.state = customers.customer_state
-WHERE osc.seller_count = 1
+    SELECT
+        sso.order_id,
+        sso.seller_id,
+        s.seller_state,
+        c.customer_state,
+        s.seller_zip_code_prefix,
+        c.customer_zip_code_prefix,
+        sg.latitude AS seller_latitude,
+        sg.longitude AS seller_longitude,
+        cg.latitude AS customer_latitude,
+        cg.longitude AS customer_longitude
+    FROM single_seller_orders AS sso
+    JOIN orders AS o USING (order_id)
+    JOIN sellers AS s USING (seller_id)
+    JOIN customers AS c USING (customer_id)
+    JOIN zip_coordinates AS sg
+        ON s.seller_zip_code_prefix = sg.zip_prefix
+       AND s.seller_state = sg.state
+    JOIN zip_coordinates AS cg
+        ON c.customer_zip_code_prefix = cg.zip_prefix
+       AND c.customer_state = cg.state
 ),
-coordinates_radians AS ( 
-SELECT
-    order_id,
-    seller_id,
-    customer_state,
-    seller_state,
-    seller_latitude,
-    seller_longitude,
-    customer_latitude,
-    customer_longitude,
-    RADIANS(seller_latitude) AS seller_lat_rad,
-    RADIANS(seller_longitude) AS seller_lng_rad,
-    RADIANS(customer_latitude) AS customer_lat_rad,
-    RADIANS(customer_longitude) AS customer_lng_rad
-FROM route_coordinates rc
-WHERE (rc.seller_latitude IS NOT NULL AND rc.customer_latitude IS NOT NULL AND rc.seller_longitude IS NOT NULL AND rc.customer_longitude IS NOT NULL)
-),
-haversine_components AS (
-SELECT
-    order_id,
-    seller_id,
-    seller_state,
-    customer_state,
-    customer_lat_rad - seller_lat_rad AS delta_lat,
-    customer_lng_rad - seller_lng_rad AS delta_lng,
-    POW(SIN(delta_lat / 2), 2) + COS(seller_lat_rad) * COS(customer_lat_rad) * POW(SIN(delta_lng / 2), 2) AS a
-FROM coordinates_radians
+haversine AS (
+    SELECT
+        *,
+        POW(
+            SIN((RADIANS(customer_latitude) - RADIANS(seller_latitude)) / 2),
+            2
+        )
+        + COS(RADIANS(seller_latitude))
+        * COS(RADIANS(customer_latitude))
+        * POW(
+            SIN((RADIANS(customer_longitude) - RADIANS(seller_longitude)) / 2),
+            2
+        ) AS a
+    FROM route_coordinates
 )
-SELECT 
+SELECT
     order_id,
-    rc.seller_id,
-    rc.seller_state,
-    rc.customer_state,
+    seller_id,
+    seller_state,
+    customer_state,
     seller_zip_code_prefix,
     customer_zip_code_prefix,
     seller_latitude,
@@ -1151,205 +580,370 @@ SELECT
     customer_latitude,
     customer_longitude,
     6371 * 2 * ASIN(SQRT(a)) AS straight_line_distance_km
-FROM haversine_components     
-    JOIN route_coordinates rc USING (order_id)
+FROM haversine
 """)
 
 # %%
-con.sql("""
-SELECT COUNT(*), COUNT(DISTINCT order_id)
+route_grain_check = con.sql("""
+SELECT
+    COUNT(*) AS rows_count,
+    COUNT(DISTINCT order_id) AS unique_orders,
+    COUNT(*) - COUNT(DISTINCT order_id) AS duplicate_orders
 FROM route_distances
-""")
+""").df()
+route_grain_check
 
 # %%
-con.sql("""
-SELECT
-    QUANTILE_CONT(straight_line_distance_km, 0.8) AS p80,
-    QUANTILE_CONT(straight_line_distance_km, 0.9) AS p90,
-    QUANTILE_CONT(straight_line_distance_km, 0.95) AS p95,
-    QUANTILE_CONT(straight_line_distance_km, 0.99) AS p99,
-    QUANTILE_CONT(straight_line_distance_km, 0.999) AS p99_9,
-FROM route_distances
-""")
-
-# %%
-con.sql("""
-SELECT 
-    customer_state, 
-    seller_state, 
-    seller_zip_code_prefix, 
-    customer_zip_code_prefix, 
-    straight_line_distance_km,
-    exc_seller.lat_diff as seller_lat_diff, 
-    exc_customer.lat_diff as customer_lat_diff, 
-    exc_seller.lng_diff as seller_lng_diff,
-    exc_customer.lng_diff as customer_lng_diff,
-FROM route_distances rc
-    LEFT JOIN zip_coordinates exc_seller
-        ON rc.seller_zip_code_prefix = exc_seller.zip_prefix
-        AND rc.seller_state = exc_seller.state
-    LEFT JOIN zip_coordinates exc_customer
-        ON rc.customer_zip_code_prefix = exc_customer.zip_prefix
-        AND rc.customer_state = exc_customer.state
-ORDER BY straight_line_distance_km DESC
-LIMIT 20;
-""")
-
-# %%
-con.sql("""
-SELECT 
-    COUNT(*),
-    MEDIAN(lat_diff) AS median_lat_diff,
-    MEDIAN(lng_diff) AS median_lng_diff,
-    QUANTILE_CONT(lat_diff, 0.9) AS lat_diff_p90,
-    QUANTILE_CONT(lat_diff, 0.95) AS lat_diff_p95,
-    QUANTILE_CONT(lat_diff, 0.99) AS lat_diff_p99,
-    QUANTILE_CONT(lat_diff, 0.999) AS lat_diff_p999,
-    QUANTILE_CONT(lng_diff, 0.9) AS lng_diff_p90,
-    QUANTILE_CONT(lng_diff, 0.95) AS lng_diff_p95,
-    QUANTILE_CONT(lng_diff, 0.99) AS lng_diff_p99,
-    QUANTILE_CONT(lng_diff, 0.999) AS lng_diff_p999,
-    MAX(lat_diff),
-    MAX(lng_diff)
-FROM zip_coordinates
-""")
-
-# %%
-con.sql("""
-WITH zip_tresholds AS ( 
-SELECT 
-    QUANTILE_CONT(lat_diff, 0.999) AS lat_diff_p999,
-    QUANTILE_CONT(lng_diff, 0.999) AS lng_diff_p999,
-FROM zip_coordinates
+geolocation_quality = con.sql("""
+WITH thresholds AS (
+    SELECT
+        QUANTILE_CONT(lat_diff, 0.999) AS lat_diff_p999,
+        QUANTILE_CONT(lng_diff, 0.999) AS lng_diff_p999
+    FROM zip_coordinates
 ),
 zip_quality AS (
-SELECT 
-    zip_prefix,
-    state,
-    lat_diff > lat_diff_p999 AS lat_cond,
-    lng_diff > lng_diff_p999 AS lng_cond
-FROM zip_coordinates
-    CROSS JOIN zip_tresholds
+    SELECT
+        z.zip_prefix,
+        z.state,
+        z.lat_diff > t.lat_diff_p999
+            OR z.lng_diff > t.lng_diff_p999 AS suspicious_zip
+    FROM zip_coordinates AS z
+    CROSS JOIN thresholds AS t
+),
+route_quality AS (
+    SELECT
+        rd.order_id,
+        sq.suspicious_zip OR cq.suspicious_zip AS suspicious_route
+    FROM route_distances AS rd
+    JOIN zip_quality AS sq
+        ON rd.seller_zip_code_prefix = sq.zip_prefix
+       AND rd.seller_state = sq.state
+    JOIN zip_quality AS cq
+        ON rd.customer_zip_code_prefix = cq.zip_prefix
+       AND rd.customer_state = cq.state
 )
 SELECT
-    COUNT(*),
-    COUNT(*) FILTER (WHERE lat_cond OR lng_cond),
-    COUNT(*) FILTER (WHERE lat_cond AND lng_cond)
-FROM zip_quality
-""")
-
-# %%
-con.sql("""
-WITH zip_tresholds AS ( 
-SELECT 
-    QUANTILE_CONT(lat_diff, 0.999) AS lat_diff_p999,
-    QUANTILE_CONT(lng_diff, 0.999) AS lng_diff_p999,
-FROM zip_coordinates
-),
-zip_quality AS (
-SELECT 
-    zip_prefix,
-    state,
-    lat_diff > lat_diff_p999 AS lat_cond,
-    lng_diff > lng_diff_p999 AS lng_cond
-FROM zip_coordinates
-    CROSS JOIN zip_tresholds
-),
-route_zip_quality AS (
-SELECT 
-    order_id,
-    seller_zip_code_prefix,
-    seller_state,
-    customer_zip_code_prefix,
-    customer_state,
-    seller_quality.lat_cond AS seller_lat_cond,
-    seller_quality.lng_cond AS seller_lng_cond,
-    customer_quality.lat_cond AS customer_lat_cond,
-    customer_quality.lng_cond AS customer_lng_cond,
-
-FROM route_distances rd
-    JOIN zip_quality seller_quality 
-        ON rd.seller_zip_code_prefix = seller_quality.zip_prefix
-        AND rd.seller_state = seller_quality.state
-    JOIN zip_quality customer_quality 
-        ON rd.customer_zip_code_prefix = customer_quality.zip_prefix
-        AND rd.customer_state = customer_quality.state
-),
-route_quality_summary AS ( 
-SELECT
-    COUNT(*) as orders_count,
-    COUNT(*) FILTER (WHERE seller_lat_cond OR seller_lng_cond) AS seller_suspicious,
-    COUNT(*) FILTER (WHERE customer_lat_cond OR customer_lng_cond) AS customer_suspicious,
-    COUNT(*) FILTER (WHERE (seller_lat_cond OR seller_lng_cond) OR (customer_lat_cond OR customer_lng_cond)) AS route_suspicious
-
-FROM route_zip_quality
-)
-SELECT route_suspicious / orders_count * 100 AS suspicious_pct FROM route_quality_summary
-""")
-
-# %%
-con.sql("""
-WITH zip_tresholds AS ( 
-SELECT 
-    QUANTILE_CONT(lat_diff, 0.999) AS lat_diff_p999,
-    QUANTILE_CONT(lng_diff, 0.999) AS lng_diff_p999,
-FROM zip_coordinates
-),
-zip_quality AS (
-SELECT 
-    zip_prefix,
-    state,
-    lat_diff > lat_diff_p999 AS lat_cond,
-    lng_diff > lng_diff_p999 AS lng_cond
-FROM zip_coordinates
-    CROSS JOIN zip_tresholds
-),
-route_zip_quality AS (
-SELECT 
-    order_id,
-    seller_zip_code_prefix,
-    seller_state,
-    customer_zip_code_prefix,
-    customer_state,
-    straight_line_distance_km,
-    seller_quality.lat_cond AS seller_lat_cond,
-    seller_quality.lng_cond AS seller_lng_cond,
-    customer_quality.lat_cond AS customer_lat_cond,
-    customer_quality.lng_cond AS customer_lng_cond,
-    (
-        seller_lat_cond
-        OR seller_lng_cond
-        OR customer_lat_cond
-        OR customer_lng_cond
-    ) AS is_suspicious_route
-
-FROM route_distances rd
-    JOIN zip_quality seller_quality 
-        ON rd.seller_zip_code_prefix = seller_quality.zip_prefix
-        AND rd.seller_state = seller_quality.state
-    JOIN zip_quality customer_quality 
-        ON rd.customer_zip_code_prefix = customer_quality.zip_prefix
-        AND rd.customer_state = customer_quality.state
-)
-SELECT 
-    is_suspicious_route,
-    COUNT(*),
-    AVG(straight_line_distance_km),
-    MEDIAN(straight_line_distance_km),
-    MIN(straight_line_distance_km),
-    MAX(straight_line_distance_km),
-    QUANTILE_CONT(straight_line_distance_km, 0.99)
-    
-
-FROM route_zip_quality
-GROUP BY is_suspicious_route
-""")
+    COUNT(*) AS routes_count,
+    COUNT(*) FILTER (WHERE suspicious_route) AS suspicious_routes,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE suspicious_route) / COUNT(*),
+        3
+    ) AS suspicious_share_pct
+FROM route_quality
+""").df()
+geolocation_quality
 
 # %% [markdown]
-# #### Вывод: 
-# 63 маршрута (0,07%) связаны с ZIP-префиксами, имеющими экстремальный внутренний разброс координат. Эти маршруты в среднем длиннее остальных, однако их исключение практически не изменяет среднее, медиану и 99-й перцентиль расстояния. Максимальное расстояние остаётся аномальным, поскольку фильтр внутреннего разброса не обнаруживает согласованно ошибочные координаты. Поэтому экстремумы следует интерпретировать осторожно, тогда как основные характеристики распределения устойчивы к найденным аномалиям.
+# Только 63 маршрута (около 0,07%) используют ZIP-префиксы с экстремальным
+# внутренним разбросом координат. Их исключение почти не меняет основные
+# характеристики распределения расстояний. При этом отдельные согласованно
+# ошибочные координаты могут не выявляться таким правилом, поэтому максимальные
+# расстояния не интерпретируются буквально.
 
 # %% [markdown]
-# ### Связь расстояния и опоздания RJ
+# ### 6.2 Расстояние и доля опозданий
 
 # %%
+distance_late_metrics = con.sql("""
+WITH bucketed AS (
+    SELECT
+        df.order_id,
+        df.is_late,
+        rd.straight_line_distance_km,
+        CASE
+            WHEN rd.customer_state = 'SP' THEN 'SP'
+            WHEN rd.customer_state = 'RJ' THEN 'RJ'
+            ELSE 'Other states'
+        END AS state_group,
+        CASE
+            WHEN rd.straight_line_distance_km < 100 THEN 1
+            WHEN rd.straight_line_distance_km < 300 THEN 2
+            WHEN rd.straight_line_distance_km < 500 THEN 3
+            WHEN rd.straight_line_distance_km < 850 THEN 4
+            WHEN rd.straight_line_distance_km < 1400 THEN 5
+            WHEN rd.straight_line_distance_km < 2000 THEN 6
+            ELSE 7
+        END AS distance_group_num,
+        CASE
+            WHEN rd.straight_line_distance_km < 100 THEN '0–100'
+            WHEN rd.straight_line_distance_km < 300 THEN '100–300'
+            WHEN rd.straight_line_distance_km < 500 THEN '300–500'
+            WHEN rd.straight_line_distance_km < 850 THEN '500–850'
+            WHEN rd.straight_line_distance_km < 1400 THEN '850–1400'
+            WHEN rd.straight_line_distance_km < 2000 THEN '1400–2000'
+            ELSE '2000+'
+        END AS distance_group
+    FROM delivery_features AS df
+    JOIN route_distances AS rd USING (order_id)
+)
+SELECT
+    state_group,
+    distance_group_num,
+    distance_group,
+    COUNT(*) AS orders_count,
+    COUNT(*) FILTER (WHERE is_late) AS late_orders,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE is_late) / COUNT(*),
+        2
+    ) AS late_share_pct
+FROM bucketed
+GROUP BY state_group, distance_group_num, distance_group
+ORDER BY distance_group_num, state_group
+""").df()
+distance_late_metrics
+
+# %%
+distance_plot = distance_late_metrics.query("distance_group_num <= 5").copy()
+
+fig, ax = plt.subplots(figsize=(11, 6))
+
+sns.lineplot(
+    data=distance_plot,
+    x="distance_group_num",
+    y="late_share_pct",
+    hue="state_group",
+    style="state_group",
+    markers=True,
+    dashes=False,
+    linewidth=2,
+    markersize=8,
+    ax=ax,
+)
+
+group_labels = (
+    distance_plot[["distance_group_num", "distance_group"]]
+    .drop_duplicates()
+    .sort_values("distance_group_num")
+)
+ax.set_xticks(group_labels["distance_group_num"])
+ax.set_xticklabels(group_labels["distance_group"])
+ax.set(
+    title="Расстояние не объясняет высокий уровень опозданий RJ",
+    xlabel="Прямолинейное расстояние, км",
+    ylabel="Опоздавшие заказы, %",
+)
+ax.legend(title="Штат покупателя", frameon=False)
+sns.despine(ax=ax)
+fig.tight_layout()
+fig.savefig(FIGURES_DIR / "distance-and-late-share.png", bbox_inches="tight")
+plt.show()
+
+# %% [markdown]
+# Для остальных штатов доля опозданий в целом растёт с расстоянием. Однако RJ
+# остаётся заметно хуже SP внутри основных диапазонов, поэтому высокий уровень
+# опозданий RJ нельзя объяснить только длиной маршрута.
+#
+# На графике показаны интервалы до 1400 км. В более дальних интервалах для RJ
+# и SP остаётся слишком мало заказов для устойчивого визуального сравнения.
+
+# %% [markdown]
+# ### 6.3 Сопоставимые маршруты из SP
+#
+# Сравниваются две крупные группы с близким средним расстоянием 300–500 км:
+# **SP → SP** и **SP → RJ**. Перед сравнением исключаются строки с нарушенной
+# хронологией `purchase ≤ carrier ≤ customer`.
+
+# %%
+route_date_quality = con.sql("""
+WITH comparable_routes AS (
+    SELECT
+        df.order_id,
+        rd.seller_state,
+        rd.customer_state,
+        df.order_purchase_timestamp,
+        df.order_delivered_carrier_date,
+        df.order_delivered_customer_date
+    FROM delivery_features AS df
+    JOIN route_distances AS rd USING (order_id)
+    WHERE rd.seller_state = 'SP'
+      AND rd.customer_state IN ('SP', 'RJ')
+      AND rd.straight_line_distance_km >= 300
+      AND rd.straight_line_distance_km < 500
+)
+SELECT
+    seller_state,
+    customer_state,
+    COUNT(*) AS orders_count,
+    COUNT(*) FILTER (
+        WHERE order_delivered_carrier_date IS NULL
+    ) AS missing_carrier_date,
+    COUNT(*) FILTER (
+        WHERE order_delivered_carrier_date < order_purchase_timestamp
+    ) AS carrier_before_purchase,
+    COUNT(*) FILTER (
+        WHERE order_delivered_customer_date < order_delivered_carrier_date
+    ) AS customer_before_carrier
+FROM comparable_routes
+GROUP BY seller_state, customer_state
+ORDER BY customer_state
+""").df()
+route_date_quality
+
+# %%
+route_stage_metrics = con.sql("""
+WITH comparable_routes AS (
+    SELECT
+        df.order_id,
+        rd.seller_state,
+        rd.customer_state,
+        rd.straight_line_distance_km,
+        df.is_late,
+        df.delay_days,
+        EXTRACT(
+            EPOCH FROM (
+                df.order_delivered_carrier_date - df.order_purchase_timestamp
+            )
+        ) / 86400.0 AS purchase_to_carrier_days,
+        EXTRACT(
+            EPOCH FROM (
+                df.order_delivered_customer_date - df.order_delivered_carrier_date
+            )
+        ) / 86400.0 AS carrier_to_customer_days,
+        EXTRACT(
+            EPOCH FROM (
+                df.order_delivered_customer_date - df.order_purchase_timestamp
+            )
+        ) / 86400.0 AS actual_delivery_days,
+        EXTRACT(
+            EPOCH FROM (
+                df.order_estimated_delivery_date - df.order_purchase_timestamp
+            )
+        ) / 86400.0 AS promised_delivery_days
+    FROM delivery_features AS df
+    JOIN route_distances AS rd USING (order_id)
+    WHERE rd.seller_state = 'SP'
+      AND rd.customer_state IN ('SP', 'RJ')
+      AND rd.straight_line_distance_km >= 300
+      AND rd.straight_line_distance_km < 500
+      AND df.order_delivered_carrier_date >= df.order_purchase_timestamp
+      AND df.order_delivered_customer_date >= df.order_delivered_carrier_date
+)
+SELECT
+    seller_state || ' → ' || customer_state AS route,
+    COUNT(*) AS orders_count,
+    ROUND(AVG(straight_line_distance_km), 1) AS average_distance_km,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE is_late) / COUNT(*),
+        2
+    ) AS late_share_pct,
+    ROUND(AVG(purchase_to_carrier_days), 2) AS purchase_to_carrier_days,
+    ROUND(AVG(carrier_to_customer_days), 2) AS carrier_to_customer_days,
+    ROUND(AVG(actual_delivery_days), 2) AS actual_delivery_days,
+    ROUND(AVG(promised_delivery_days), 2) AS promised_delivery_days,
+    QUANTILE_CONT(delay_days, 0.75) AS delay_p75,
+    QUANTILE_CONT(delay_days, 0.90) AS delay_p90,
+    QUANTILE_CONT(delay_days, 0.95) AS delay_p95
+FROM comparable_routes
+GROUP BY seller_state, customer_state
+ORDER BY customer_state
+""").df()
+route_stage_metrics
+
+# %%
+fig, ax = plt.subplots(figsize=(8.5, 6))
+x = range(len(route_stage_metrics))
+
+pre_carrier = route_stage_metrics["purchase_to_carrier_days"]
+in_transit = route_stage_metrics["carrier_to_customer_days"]
+
+bars_pre = ax.bar(
+    x,
+    pre_carrier,
+    label="До передачи перевозчику",
+    color="#74a9cf",
+)
+bars_transit = ax.bar(
+    x,
+    in_transit,
+    bottom=pre_carrier,
+    label="После передачи перевозчику",
+    color="#ef8a62",
+)
+ax.scatter(
+    x,
+    route_stage_metrics["promised_delivery_days"],
+    marker="D",
+    s=55,
+    color="#4d4d4d",
+    label="Обещанный срок",
+    zorder=3,
+)
+
+ax.bar_label(bars_pre, fmt="%.1f", label_type="center", color="white", fontsize=10)
+ax.bar_label(bars_transit, fmt="%.1f", label_type="center", color="white", fontsize=10)
+
+for index, row in route_stage_metrics.iterrows():
+    ax.text(
+        index,
+        row["actual_delivery_days"] + 0.35,
+        f"Факт: {row['actual_delivery_days']:.1f} дн.\nОпоздания: {row['late_share_pct']:.1f}%",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+    )
+
+ax.set_xticks(list(x))
+ax.set_xticklabels(route_stage_metrics["route"])
+ax.set(
+    title="Разрыв SP → RJ возникает после передачи перевозчику",
+    xlabel="Маршрут",
+    ylabel="Среднее количество дней",
+)
+ax.legend(frameon=False, loc="upper left")
+sns.despine(ax=ax)
+fig.tight_layout()
+fig.savefig(FIGURES_DIR / "sp-rj-delivery-stages.png", bbox_inches="tight")
+plt.show()
+
+# %% [markdown]
+# В сопоставимом диапазоне расстояний маршруты SP → RJ опаздывают примерно
+# в 13% случаев против менее 5% для SP → SP. Фактическая доставка в RJ занимает
+# примерно на 5,4 дня больше. Разница до передачи перевозчику составляет менее
+# половины дня, а около пяти дополнительных дней возникает после передачи
+# перевозчику.
+#
+# Для RJ заранее устанавливается более длинный обещанный срок, но верхний хвост
+# остаётся проблемным: p90 задержки уже положителен, тогда как для SP он остаётся
+# отрицательным. Следовательно, средний обещанный срок не полностью отражает
+# риск затяжных доставок.
+
+# %% [markdown]
+# ## 7. Выводы и рекомендации
+#
+# ### Основные наблюдения
+#
+# 1. Среди доставленных заказов с известными датами 6,77% доставлены позже
+#    обещанной календарной даты.
+# 2. Опоздания связаны с ухудшением оценок: средний балл снижается с 4,29
+#    для своевременной доставки до 2,11 при задержке на 4–7 дней.
+# 3. RJ сочетает большой объём заказов и высокую долю опозданий — около 12,1%
+#    против 4,5% в SP.
+# 4. Расстояние связано с опозданиями, но не объясняет разрыв RJ. Для маршрутов
+#    одного продавца из SP на расстоянии 300–500 км доля опозданий SP → RJ
+#    примерно втрое выше SP → SP.
+# 5. Почти весь разрыв среднего фактического срока возникает после передачи
+#    заказа перевозчику.
+#
+# ### Возможное объяснение
+#
+# Результаты указывают на различия в работе транспортного этапа направления
+# SP → RJ: маршрутизации, сортировочных узлах, региональной инфраструктуре
+# или составе перевозчиков. Это гипотезы, а не установленные причины.
+#
+# ### Практические рекомендации
+#
+# - В первую очередь исследовать транспортный этап SP → RJ на данных
+#   перевозчиков и сортировочных узлов.
+# - Контролировать не только средний срок, но также p90/p95: именно верхний хвост
+#   приводит к нарушению обещанной даты.
+# - Отдельно отслеживать задержки свыше четырёх дней, поскольку они связаны
+#   с резким снижением оценки покупателя.
+#
+# ### Ограничения
+#
+# - В данных нет идентификатора перевозчика и событий между передачей заказа
+#   перевозчику и вручением покупателю.
+# - Расстояние прямолинейное и рассчитано по приблизительным координатам ZIP.
+# - Анализ расстояний исключает заказы с несколькими продавцами.
+# - Наблюдаемые связи не доказывают причинность.
+# - GOV не является показателем прибыли или чистой выручки Olist.
